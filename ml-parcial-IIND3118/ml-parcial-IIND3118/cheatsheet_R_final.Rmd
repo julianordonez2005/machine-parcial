@@ -1,0 +1,519 @@
+---
+title: "Cheatsheet R — Introducción al Machine Learning (IIND3118)"
+subtitle: "Los métodos que se vieron en R en clase, listos para usar con cualquier dataset"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: false
+    theme: flatly
+    df_print: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 7, fig.height = 4.5, comment = "")
+```
+
+# Cómo usar este archivo
+
+1. Abre este `.Rmd` en **RStudio**.
+2. Corre el chunk **PAQUETES** (una sola vez).
+3. En **CARGAR DATOS** cambia solo dos cosas: el nombre del archivo y la columna respuesta.
+4. Salta al método que necesites y corre su chunk con el botón ▶ verde (o `Ctrl+Shift+Enter`).
+
+Para navegar rápido en RStudio: `Ctrl+Shift+O` abre el índice de secciones.
+
+**Todos los métodos usan los mismos nombres**, que se crean solos al cargar los datos:
+
+| Objeto | Qué es |
+|---|---|
+| `X` | Predictores en matriz (las columnas de texto ya convertidas en dummies) |
+| `Xs` | `X` estandarizada (media 0, sd 1) |
+| `y` | Variable respuesta |
+| `train`, `test` | Partición 70/30 **con la respuesta renombrada a `y`**, para escribir `lm(y ~ ., data = train)` |
+| `X_train`, `X_test`, `y_train`, `y_test` | Lo mismo en formato matriz, para `glmnet` |
+
+**Contenido** — son los temas que en clase se trabajaron en R:
+
+| Parte | Métodos |
+|---|---|
+| Supervisado (clases 13–14) | Modelo lineal · Selección de variables (exhaustiva y forward) · Ridge · Lasso · Elastic Net · Comparación |
+| No supervisado (clases 6–9) | PCA · MDS · Análisis Factorial · Kernel PCA · SVD |
+
+---
+
+# PAQUETES
+
+```{r paquetes, message=FALSE, warning=FALSE}
+# Si falta alguno: install.packages(c("leaps","glmnet","kernlab","psych","cluster","MASS"))
+library(leaps)     # regsubsets: seleccion de variables
+library(glmnet)    # Ridge, Lasso, Elastic Net
+library(kernlab)   # kpca: Kernel PCA
+library(psych)     # cor.plot, KMO (analisis factorial)
+library(cluster)   # daisy: distancia de Gower
+library(MASS)      # isoMDS: MDS no metrico
+```
+
+# CARGAR DATOS — el único bloque que se edita
+
+```{r datos}
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  CAMBIA SOLO ESTAS DOS LINEAS                                   ║
+# ╚══════════════════════════════════════════════════════════════════╝
+DATOS  <- "F2_atletas.csv"   # <- ruta de tu archivo .csv
+TARGET <- NULL                       # <- columna respuesta. NULL si no hay (no supervisado)
+
+# Otras formas de leer (descomenta la que necesites):
+# df <- read.table("measure.txt", header = TRUE)          # texto separado por espacios
+# df <- read.csv("archivo.csv", sep = ";", dec = ",")     # CSV con ; y coma decimal
+# ════════════════════════════════════════════════════════════════════
+# De aqui para abajo no se toca nada
+# ════════════════════════════════════════════════════════════════════
+
+df <- read.csv(DATOS, stringsAsFactors = TRUE)
+df <- na.omit(df)                                   # quita filas con datos faltantes
+
+if (!is.null(TARGET) && !(TARGET %in% names(df)))
+  stop("La columna '", TARGET, "' no existe. Columnas disponibles: ",
+       paste(names(df), collapse = ", "))
+
+if (!is.null(TARGET)) {
+  y    <- df[[TARGET]]
+  X_df <- df[, names(df) != TARGET, drop = FALSE]
+} else {
+  y    <- NULL
+  X_df <- df
+}
+
+# Matriz de predictores: las variables de texto se vuelven dummies solas
+X <- model.matrix(~ ., data = X_df)[, -1, drop = FALSE]
+colnames(X) <- make.names(colnames(X))
+Xs <- scale(X)
+
+# Particion train/test (mismo estilo que en clase)
+if (!is.null(y)) {
+  datos <- data.frame(X, y = y)                     # la respuesta pasa a llamarse "y"
+  set.seed(23)
+  n1 <- sample(1:nrow(datos), round(0.70 * nrow(datos)))   # <- 0.70 = 70% train
+  train <- datos[n1, ]
+  test  <- datos[-n1, ]
+
+  X_train <- model.matrix(y ~ ., train)[, -1]       # formato matriz para glmnet
+  X_test  <- model.matrix(y ~ ., test)[, -1]
+  y_train <- train$y
+  y_test  <- test$y
+}
+
+cat("Filas:", nrow(df), " | Predictores:", ncol(X), "\n")
+cat("Predictores:", paste(colnames(X), collapse = ", "), "\n")
+if (!is.null(y)) cat("Respuesta:", TARGET, " | train:", nrow(train), " test:", nrow(test), "\n") else
+  cat("Sin respuesta: problema NO supervisado\n")
+```
+
+---
+
+# PARTE A — SUPERVISADO
+
+> Los códigos de clase trabajan **regresión** (respuesta numérica). Todo se evalúa con el **MSE en test**: el error cuadrático promedio en datos que el modelo no vio.
+> $$MSE = \frac{1}{n_{test}}\sum (y_i - \hat y_i)^2$$
+
+## A1. Modelo lineal
+
+**Qué hace:** busca la recta (o plano) que mejor pasa por los datos, minimizando la suma de errores al cuadrado. Usa **todas** las variables.
+
+**Cómo se lee un coeficiente:** si $X_j$ sube una unidad, $y$ cambia en $\beta_j$ unidades, manteniendo las demás constantes. Si `Pr(>|t|) < 0.05`, la variable es significativa.
+
+**AIC y BIC:** miden ajuste castigando la complejidad. Se **minimizan**. El BIC castiga más ($p\log n$ contra $2p$), así que prefiere modelos más pequeños.
+
+```{r lineal}
+lm1 <- lm(y ~ ., data = train)       # "y ~ ." = y contra todas las variables
+summary(lm1)
+
+AIC(lm1); BIC(lm1)
+
+pred <- predict(lm1, test)
+mse  <- mean((test$y - pred)^2)
+cat("MSE test (lineal):", round(mse, 3), "\n")
+
+plot(test$y, pred, pch = 16, col = "steelblue",
+     xlab = "y real (test)", ylab = "y predicho", main = "Modelo lineal: predicho vs real")
+abline(0, 1, col = "red", lwd = 2)
+```
+
+## A2. Selección de variables — exhaustiva
+
+**Qué hace:** prueba **todas** las combinaciones posibles de variables ($2^p-1$ modelos) y reporta el mejor modelo para cada tamaño $k$.
+
+- ✅ Garantiza encontrar el mejor subconjunto.
+- ❌ Crece exponencialmente: con más de ~20–25 variables tarda demasiado → usar forward (A3).
+
+**Cómo elegir el tamaño:** Cp de Mallows y BIC se **minimizan**; R² ajustado se **maximiza**.
+
+| Parámetro de `regsubsets` | Qué poner |
+|---|---|
+| `nvmax` | Máximo de variables a considerar (aquí: todas) |
+| `method` | `"exhaustive"` (por defecto) · `"forward"` · `"backward"` |
+
+```{r exhaustiva}
+p <- ncol(train) - 1                             # numero de predictores
+reg_subset <- regsubsets(y ~ ., data = train, nvmax = p, method = "exhaustive")
+reg_sub_summary <- summary(reg_subset)
+reg_sub_summary                                  # asteriscos = variables incluidas en cada tamano
+
+par(mfrow = c(1, 3))
+plot(reg_sub_summary$cp,    type = "b", xlab = "numero de variables", ylab = "Cp",  main = "Cp de Mallows (MIN)")
+points(which.min(reg_sub_summary$cp), min(reg_sub_summary$cp), col = "red", pch = 19, cex = 2)
+plot(reg_sub_summary$bic,   type = "b", col = "red",  xlab = "numero de variables", ylab = "BIC", main = "BIC (MIN)")
+points(which.min(reg_sub_summary$bic), min(reg_sub_summary$bic), col = "black", pch = 19, cex = 2)
+plot(reg_sub_summary$adjr2, type = "b", col = "blue", xlab = "numero de variables", ylab = "R2 ajustado", main = "R2 ajustado (MAX)")
+points(which.max(reg_sub_summary$adjr2), max(reg_sub_summary$adjr2), col = "red", pch = 19, cex = 2)
+par(mfrow = c(1, 1))
+
+k_best <- which.min(reg_sub_summary$cp)          # <- o which.min(...$bic), o which.max(...$adjr2)
+cat("Tamano elegido por Cp:", k_best, "variables\n")
+coef(reg_subset, k_best)                         # coeficientes del mejor modelo
+
+# Modelo final con esas variables y su MSE en test
+vars_exh <- names(coef(reg_subset, k_best))[-1]
+lm_exh   <- lm(as.formula(paste("y ~", paste(vars_exh, collapse = " + "))), data = train)
+mse_exh  <- mean((test$y - predict(lm_exh, test))^2)
+cat("Variables:", paste(vars_exh, collapse = ", "), "\n")
+cat("MSE test (exhaustiva):", round(mse_exh, 3), "\n")
+```
+
+## A3. Selección de variables — forward
+
+**Qué hace:** empieza sin variables y en cada paso agrega **la que más mejora** el modelo. Solo evalúa $p(p+1)/2$ modelos, así que sirve con muchas variables.
+
+- ❌ Es una heurística: **no garantiza** el mejor modelo. Una variable escogida al principio no se vuelve a quitar.
+
+Mismo código que A2, solo cambia `method = "forward"`.
+
+```{r forward}
+reg_fwd <- regsubsets(y ~ ., data = train, nvmax = p, method = "forward")
+sum_fwd <- summary(reg_fwd)
+
+par(mfrow = c(1, 3))
+plot(sum_fwd$cp,    type = "b", xlab = "numero de variables", ylab = "Cp",  main = "Forward: Cp (MIN)")
+points(which.min(sum_fwd$cp), min(sum_fwd$cp), col = "red", pch = 19, cex = 2)
+plot(sum_fwd$bic,   type = "b", col = "red",  xlab = "numero de variables", ylab = "BIC", main = "Forward: BIC (MIN)")
+points(which.min(sum_fwd$bic), min(sum_fwd$bic), col = "black", pch = 19, cex = 2)
+plot(sum_fwd$adjr2, type = "b", col = "blue", xlab = "numero de variables", ylab = "R2 ajustado", main = "Forward: R2 ajustado (MAX)")
+points(which.max(sum_fwd$adjr2), max(sum_fwd$adjr2), col = "red", pch = 19, cex = 2)
+par(mfrow = c(1, 1))
+
+k_fwd <- which.min(sum_fwd$cp)                   # <- criterio de eleccion
+vars_fwd <- names(coef(reg_fwd, k_fwd))[-1]
+lm_fwd   <- lm(as.formula(paste("y ~", paste(vars_fwd, collapse = " + "))), data = train)
+mse_fwd  <- mean((test$y - predict(lm_fwd, test))^2)
+
+cat("Forward eligio", k_fwd, "variables:", paste(vars_fwd, collapse = ", "), "\n")
+cat("MSE test (forward):", round(mse_fwd, 3), "\n")
+```
+
+## A4. Ridge (penalización cuadrática)
+
+**Qué hace:** minimiza el error **más** un castigo a los coeficientes grandes: $\lambda\sum\beta_j^2$. Los **encoge** hacia cero pero **nunca los deja en cero exacto**. Útil cuando hay variables muy correlacionadas (multicolinealidad).
+
+| Parámetro de `glmnet` | Qué poner |
+|---|---|
+| `alpha` | **0 = Ridge** · 1 = Lasso · entre 0 y 1 = Elastic Net |
+| `lambda` | El castigo. Se elige con validación cruzada: `cv.glmnet(...)$lambda.min` |
+
+`glmnet` estandariza las variables solo (`standardize = TRUE` por defecto), así que se le pasa `X_train` sin estandarizar.
+
+**Gráficas:** la de CV muestra el error para cada $\log\lambda$ (la línea punteada izquierda es `lambda.min`). La de betas muestra cómo cada coeficiente se va encogiendo al aumentar $\lambda$.
+
+```{r ridge}
+cvmod <- cv.glmnet(X_train, y_train, alpha = 0)  # validacion cruzada para elegir lambda
+cvmod$lambda.min
+plot(cvmod)
+
+# Grafico de betas: como cambian los coeficientes con lambda
+mod_pen2_plot <- glmnet(X_train, y_train, alpha = 0)
+plot(mod_pen2_plot, xvar = "lambda", label = TRUE)
+
+# Modelo final con el lambda optimo
+mod_pen2 <- glmnet(X_train, y_train, alpha = 0, lambda = cvmod$lambda.min)
+coef(mod_pen2)
+
+predp2 <- predict(mod_pen2, X_test)
+msep2  <- mean((y_test - predp2)^2)
+cat("MSE test (Ridge):", round(msep2, 3), "\n")
+```
+
+## A5. Lasso (penalización norma 1)
+
+**Qué hace:** igual que Ridge pero con castigo $\lambda\sum|\beta_j|$. La diferencia clave: **puede dejar coeficientes exactamente en cero**, así que **selecciona variables** solo. Los que aparecen con un punto (`.`) en `coef()` son las variables descartadas.
+
+```{r lasso}
+cvmod <- cv.glmnet(X_train, y_train, alpha = 1)  # alpha = 1 -> Lasso
+cvmod$lambda.min
+plot(cvmod)
+
+mod_pen1_plot <- glmnet(X_train, y_train, alpha = 1)
+plot(mod_pen1_plot, xvar = "lambda", label = TRUE)   # las lineas TOCAN el cero: seleccion
+
+mod_pen1 <- glmnet(X_train, y_train, alpha = 1, lambda = cvmod$lambda.min)
+coef(mod_pen1)                                       # "." = coeficiente en cero (variable descartada)
+
+b_lasso <- as.matrix(coef(mod_pen1))[-1, 1]
+cat("Variables que Lasso conserva:", paste(names(b_lasso)[b_lasso != 0], collapse = ", "), "\n")
+cat("Variables que Lasso descarta:", paste(names(b_lasso)[b_lasso == 0], collapse = ", "), "\n")
+
+predp1 <- predict(mod_pen1, X_test)
+msep1  <- mean((y_test - predp1)^2)
+cat("MSE test (Lasso):", round(msep1, 3), "\n")
+```
+
+## A6. Elastic Net
+
+**Qué hace:** mezcla Ridge y Lasso. Con `alpha` entre 0 y 1: cerca de 0 se parece a Ridge, cerca de 1 a Lasso. Sirve cuando hay variables correlacionadas **y** se quiere selección.
+
+```{r elasticnet}
+ALPHA_EN <- 0.3                                      # <- la mezcla (en clase se uso 0.3)
+
+cvmod <- cv.glmnet(X_train, y_train, alpha = ALPHA_EN)
+cvmod$lambda.min
+plot(cvmod)
+
+mod_pen_en_plot <- glmnet(X_train, y_train, alpha = ALPHA_EN)
+plot(mod_pen_en_plot, xvar = "lambda", label = TRUE)
+
+mod_pen_en <- glmnet(X_train, y_train, alpha = ALPHA_EN, lambda = cvmod$lambda.min)
+coef(mod_pen_en)
+
+predp_en <- predict(mod_pen_en, X_test)
+msep_en  <- mean((y_test - predp_en)^2)
+cat("MSE test (Elastic Net):", round(msep_en, 3), "\n")
+```
+
+## A7. Comparación de modelos
+
+El mejor es el de **menor MSE en test**. Corre antes A1 a A6.
+
+```{r comparacion}
+resultados <- c("Lineal"      = mse,
+                "Exhaustiva"  = mse_exh,
+                "Forward"     = mse_fwd,
+                "Ridge"       = msep2,
+                "Lasso"       = msep1,
+                "Elastic Net" = msep_en)
+resultados <- sort(resultados)
+print(round(resultados, 3))
+cat("\nMejor modelo:", names(resultados)[1], "\n")
+
+par(mar = c(5, 8, 3, 2))
+barplot(rev(resultados), horiz = TRUE, las = 1, col = "steelblue",
+        xlab = "MSE en test (menor = mejor)", main = "Comparacion de modelos")
+par(mar = c(5, 4, 4, 2))
+```
+
+---
+
+# PARTE B — NO SUPERVISADO
+
+> Aquí **no se usa `y`**. Todo trabaja con los predictores `X` (o `Xs`). Si tu problema es no supervisado, pon `TARGET <- NULL` al cargar los datos.
+
+## B1. PCA (Componentes Principales)
+
+**Qué hace:** resume muchas variables correlacionadas en pocas variables nuevas (componentes), que son combinaciones lineales de las originales y no están correlacionadas entre sí. El primer componente es **la dirección donde los datos más varían**.
+
+- **Varianza explicada** de cada componente: `Proportion of Variance` en `summary`.
+- **Loadings**: cuánto pesa cada variable en cada componente. Sirven para interpretar.
+- **Codo**: se buscan los componentes antes de que la curva se aplane.
+- El **signo** de los loadings es arbitrario: no es un error si cambia.
+
+| Parámetro de `princomp` | Qué poner |
+|---|---|
+| `cor = TRUE` | **Usar si las variables están en unidades distintas** (equivale a estandarizar) |
+| `scores = TRUE` | Guarda las nuevas coordenadas de cada observación |
+
+```{r pca}
+pca <- princomp(X, cor = TRUE, scores = TRUE)       # cor=TRUE: variables en escalas distintas
+summary(pca, loadings = TRUE)                       # varianza explicada + loadings
+
+var_exp <- pca$sdev^2 / sum(pca$sdev^2)
+cat("Componentes para explicar el 90%:", which(cumsum(var_exp) >= 0.90)[1], "\n")
+
+par(mfrow = c(1, 2))
+plot(pca$sdev^2, type = "b", main = "Grafico de codo", xlab = "componente", ylab = "varianza")
+plot(pca$scores[, 1], pca$scores[, 2], pch = 16, col = "steelblue",
+     xlab = "Componente 1", ylab = "Componente 2", main = "Datos en 2D")
+par(mfrow = c(1, 1))
+
+biplot(pca, cex = 0.6, main = "Biplot: observaciones + variables")
+```
+
+## B2. MDS (Escalamiento Multidimensional)
+
+**Qué hace:** a partir **solo de las distancias** entre observaciones, reconstruye un mapa de puntos que respete esas distancias. En clase: con las distancias entre ciudades europeas reconstruye el mapa de Europa.
+
+- **MDS clásico con distancia euclidiana da lo mismo que PCA.**
+- **Autovalores negativos** en `mds$eig` = la distancia no es euclidiana (pasa con Gower).
+- **No métrico** (`isoMDS`): solo respeta el orden de las distancias. Se juzga por el **STRESS**: <5 excelente, <10 bueno, <20 aceptable.
+
+| Opción | Cuándo |
+|---|---|
+| `dist(Xs)` | Variables numéricas |
+| `daisy(X_df, metric = "gower")` | Variables mixtas o categóricas (como el ejemplo de las esponjas) |
+
+```{r mds}
+dis <- dist(Xs)                                     # <- o: dis <- daisy(X_df, metric = "gower")
+
+mds <- cmdscale(dis, k = 2, eig = TRUE)             # MDS clasico (metrico)
+head(mds$eig)                                       # autovalores
+cat("Autovalores negativos:", sum(mds$eig < -1e-8), "\n")
+
+plot(mds$points, pch = 16, col = "steelblue",
+     xlab = "Dimension 1", ylab = "Dimension 2", main = "MDS clasico")
+# Con nombres en vez de puntos (si las filas tienen nombre):
+# text(mds$points, rownames(mds$points), cex = 0.6)
+
+# MDS no metrico (solo respeta el orden de las distancias)
+mds_nm <- try(isoMDS(dis, trace = FALSE), silent = TRUE)
+if (!inherits(mds_nm, "try-error")) {
+  cat("STRESS (no metrico):", round(mds_nm$stress, 2), "\n")
+  plot(mds_nm$points, pch = 16, col = "darkorange",
+       xlab = "Dimension 1", ylab = "Dimension 2", main = "MDS no metrico")
+} else cat("isoMDS no corre si hay observaciones repetidas (distancia 0).\n")
+```
+
+## B3. Análisis Factorial
+
+**Qué hace:** supone que hay **factores ocultos** que **causan** lo que se observa. Ejemplo de clase: 9 pruebas de habilidad explicadas por 3 habilidades latentes.
+
+- **Cargas (Loadings):** cuánto pesa cada factor en cada variable. Cargas altas (> 0.3–0.4) definen el factor y permiten ponerle nombre.
+- **Uniquenesses:** la parte de cada variable que no comparte con nadie.
+- **Prueba chi²:** ⚠️ **p-valor ALTO = el modelo con esos factores SÍ es adecuado** (al revés de lo habitual). Se elige el menor número de factores con p-valor > 0.05.
+- **Rotación:** `"varimax"` (factores no correlacionados, por defecto) o `"promax"` (permite correlación). No cambia el ajuste, solo facilita la interpretación.
+- Máximo de factores: con pocas variables no se pueden estimar muchos (con 4 variables, solo 1).
+
+| Parámetro de `factanal` | Qué poner |
+|---|---|
+| `factors` | Número de factores |
+| `rotation` | `"varimax"` o `"promax"` |
+| `scores` | `"regression"` para obtener el valor de cada factor por observación |
+
+```{r factorial}
+cor.plot(cor(X), main = "Matriz de correlaciones")  # bloques de correlacion alta sugieren factores
+cat("KMO:", round(KMO(cor(X))$MSA, 3), " (> 0.6 aceptable para analisis factorial)\n")
+
+# Maximo de factores que se pueden estimar con p variables
+p_var <- ncol(X)
+m_max <- floor((2 * p_var + 1 - sqrt(8 * p_var + 1)) / 2)
+cat("Con", p_var, "variables, el maximo de factores estimables es", m_max, "\n\n")
+
+# Determinando el numero de factores: mirar el p-value de cada uno
+for (m in 1:m_max) {
+  f <- try(factanal(X, factors = m), silent = TRUE)
+  if (inherits(f, "try-error")) {
+    cat("factores =", m, "  (no se pudo estimar)\n")
+  } else if (is.null(f$PVAL)) {
+    # con 0 grados de libertad no hay prueba chi2 posible
+    cat("factores =", m, "  (sin grados de libertad para la prueba)\n")
+  } else {
+    cat("factores =", m, "  p-value =", signif(f$PVAL, 3),
+        ifelse(f$PVAL > 0.05, "  <- ADECUADO", ""), "\n")
+  }
+}
+
+# OJO: si NINGUN m da p-value > 0.05 (pasa seguido con datos reales), el modelo
+# factorial no ajusta bien esos datos. En ese caso se elige el numero de factores
+# por interpretabilidad o por el criterio de Kaiser, y se reporta la limitacion.
+
+N_FACTORES <- 3                        # <- elige segun la tabla de arriba
+fa <- factanal(X, factors = N_FACTORES, rotation = "varimax", scores = "regression")
+fa                                                  # cargas, uniquenesses y prueba chi2
+print(fa$loadings, cutoff = 0.3)                    # solo las cargas importantes (> 0.3)
+
+# Distribucion del primer factor
+plot(density(fa$scores[, 1]), lwd = 2, main = "Densidad del Factor 1")
+
+# Rotacion alternativa:
+# fa2 <- factanal(X, factors = N_FACTORES, rotation = "promax"); fa2
+```
+
+## B4. Kernel PCA
+
+**Qué hace:** PCA solo encuentra estructura en línea recta. Kernel PCA lleva los datos a un espacio de más dimensiones donde sí son separables linealmente, hace PCA ahí y vuelve. Sirve cuando los datos tienen forma curva o circular (en clase: dos esferas concéntricas).
+
+| Parámetro de `kpca` | Qué poner |
+|---|---|
+| `kernel` | `"rbfdot"` (gaussiano, el de clase) |
+| `kpar = list(sigma = )` | **El parámetro clave.** Muy grande: los puntos dejan de parecerse, no hay estructura. Muy pequeño: se parece a PCA normal. En clase: 0.1, 0.2 y 1.1 |
+| `features` | Número de componentes (2 para graficar) |
+
+**Regla:** compara siempre contra PCA normal. Si PCA ya separa bien, no hace falta kernel.
+
+```{r kpca}
+SIGMA <- 0.1                                        # <- el parametro clave del kernel
+
+kpc <- kpca(~ ., data = as.data.frame(Xs), kernel = "rbfdot",
+            kpar = list(sigma = SIGMA), features = 2)
+
+par(mfrow = c(1, 2))
+plot(pca$scores[, 1:2], pch = 16, col = "steelblue",
+     xlab = "Componente 1", ylab = "Componente 2", main = "PCA normal")
+plot(rotated(kpc), pch = 16, col = "darkorange",
+     xlab = "1st Principal Component", ylab = "2nd Principal Component",
+     main = paste("Kernel PCA (sigma =", SIGMA, ")"))
+par(mfrow = c(1, 1))
+
+# Efecto de sigma: prueba varios valores
+par(mfrow = c(1, 3))
+for (s in c(0.01, 0.1, 1)) {
+  k <- kpca(~ ., data = as.data.frame(Xs), kernel = "rbfdot", kpar = list(sigma = s), features = 2)
+  plot(rotated(k), pch = 16, col = "gray40", main = paste("sigma =", s), xlab = "", ylab = "")
+}
+par(mfrow = c(1, 1))
+```
+
+## B5. SVD (Descomposición en Valores Singulares)
+
+**Qué hace:** descompone **cualquier** matriz en tres piezas: $A = U D V^\top$. Los **valores singulares** ($d$) dicen cuánta información hay en cada dirección. Quedándose con los primeros $k$ se obtiene una versión comprimida de la matriz: es la **mejor aproximación posible de rango $k$**.
+
+- **PCA es SVD sobre los datos centrados.**
+- Se elige $k$ con la **energía acumulada**: $\sum_{i\le k} d_i^2 / \sum d_i^2$.
+- En clase se aplicó a textos (matriz término-documento del paquete `tm`) para búsqueda de documentos.
+
+```{r svd}
+A  <- scale(X, center = TRUE, scale = TRUE)         # matriz a descomponer
+ss <- svd(A)
+ss$d                                                # valores singulares
+
+# Verificar la descomposicion: debe dar practicamente 0
+max(abs(A - ss$u %*% diag(ss$d) %*% t(ss$v)))
+
+# Aproximacion a menor dimension
+K_SVD <- 2                                          # <- numero de componentes a conservar
+A_k <- ss$u[, 1:K_SVD] %*% diag(ss$d[1:K_SVD]) %*% t(ss$v)[1:K_SVD, ]
+cat("Error de la aproximacion con k =", K_SVD, ":", round(sqrt(sum((A - A_k)^2)), 3), "\n")
+
+energia <- cumsum(ss$d^2) / sum(ss$d^2)
+print(round(energia, 4))
+
+par(mfrow = c(1, 2))
+plot(ss$d, type = "b", main = "Valores singulares", xlab = "i", ylab = "d")
+plot(energia, type = "b", main = "Energia acumulada", xlab = "k", ylab = "fraccion")
+abline(h = 0.9, col = "red", lty = 2)
+par(mfrow = c(1, 1))
+```
+
+---
+
+# Resumen — qué usar y qué recordar
+
+| Si te piden… | Usa | Recuerda |
+|---|---|---|
+| Ajustar e interpretar un modelo | A1 Lineal | `summary()`: coeficientes y p-values |
+| Elegir variables con pocas variables | A2 Exhaustiva | Cp y BIC se minimizan, R² ajustado se maximiza |
+| Elegir variables con muchas variables | A3 Forward | No garantiza el mejor modelo |
+| Variables correlacionadas | A4 Ridge | Nunca da ceros |
+| Que el modelo seleccione solo | A5 Lasso | Da ceros exactos (`.` en `coef`) |
+| Reducir dimensión / visualizar | B1 PCA | `cor = TRUE` si hay escalas distintas |
+| Solo tienes distancias o datos mixtos | B2 MDS | Gower con `daisy`; MDS clásico = PCA |
+| Encontrar factores latentes | B3 Factorial | p-value ALTO = modelo adecuado |
+| Estructura curva | B4 Kernel PCA | `sigma` es el parámetro clave |
+| Comprimir una matriz | B5 SVD | PCA = SVD centrada |
